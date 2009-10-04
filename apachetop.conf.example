@@ -1,0 +1,7 @@
+delay=20
+web01=http://username:password@www.myserver.com/web01-server-status
+web02=http://username:password@www.myserver.com/web02-server-status
+web03=http://username:password@www.myserver.com/web03-server-status
+web04=http://username:password@www.myserver.com/web04-server-status
+web05=http://username:password@www.myserver.com/web05-server-status
+web06=http://username:password@www.myserver.com/web06-server-status

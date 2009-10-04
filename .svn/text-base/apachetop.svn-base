@@ -1,0 +1,614 @@
+#!/usr/bin/perl --
+use warnings FATAL => 'all';
+use strict;
+
+# apachetop -- display apache server performance information like 'top'
+
+package myua;
+use base 'LWP::UserAgent';
+
+my ($user,$pass) = (undef,undef);
+
+sub set_creds             { my $self = shift; ($user,$pass) = @_ }
+sub get_basic_credentials { ($user,$pass) }
+
+1;
+
+package main;
+use Getopt::Long;
+use Term::ReadKey;
+use Term::ANSIColor qw(:constants);
+use Time::HiRes;
+#use Data::Dumper;
+use Socket;
+
+$main::VERSION = "0.1";
+
+MAIN:
+{
+    # lower our own priority
+    setpriority(0,0,3);
+
+    # get configuration
+    my $conf  = do
+    {
+	open my $fh, '<', 'apachetop.conf' or die $!;
+	
+	my %c   = ();
+	my @res = ();
+	
+      conf_line:
+	while (<$fh>)
+	{
+	    chomp;
+	    next conf_line if /^\s*\#/; # skip comments
+	    
+	    m!^(delay|mode|working_threads_threshold_pct)=(.+)$!x
+		and do { $c{$1} = $2; next conf_line }; # normal conf variables
+	    
+	    # server conf variables, anything not caught above, in the form of
+	    #
+	    #          foo=http://user:pass@hostname.com/server-status
+	    #
+	    m!^([^=]+)=                      # the friendly name of the server and an equals sign
+               http://                       # protocol
+               (?:([^:\@/]+:[^:\@/]+)\@)?    # optional username:password@
+               ([a-z0-9.-]+)                 # hostname
+               (/.+)$                        # server status page
+               !ix or next conf_line;
+	    
+	    my $c = {};
+	    
+	    $c->{name}       = $1 || '?'; 
+	    $c->{auth}       = $2 || '';
+	    $c->{domname}    = $3 || '';
+	    $c->{statuspage} = $4 || '';
+	    
+	    push @res, $c if $c->{statuspage};
+	}
+	close $fh;
+
+	{ servers => \@res, delay => 10, working_threads_threshold_pct => 90,
+	  mode    => 'top', %c };
+    };
+
+    # set display constants
+    my $CLEAR = `clear`;
+    my $RESET  = RESET()   || '';
+    my $YELLOW = YELLOW()  || '';
+    my $RED    = RED()     || '';
+    my $GREEN  = GREEN()   || '';
+    my $BLUE   = BLUE()    || '';
+    my $WHITE  = WHITE()   || '';
+    my $BOLD   = BOLD()    || '';
+
+    my $RM_RESET   = 0;
+    my $RM_NOBLKRD = 3;
+
+    ReadMode($RM_NOBLKRD);
+
+    my %last_data    = ();
+    my %ip_addresses = (); # cached domains looked up
+
+  main_loop:
+    while (1)
+    {
+	my $key; # key pressed by the user
+
+      top_mode: 
+	if ($conf->{mode} eq 'top')
+	{
+	  do_top_mode:
+	    {
+		my %data = (poll_time => int(time), by_server => {});
+
+		my @detailed_usage = (); # list of current requests
+			
+	      get_data:
+		{
+		    local $|=1;
+
+		    print $YELLOW, "Checking...          ";
+
+		    for my $server (@{$conf->{servers}})
+		    {
+			my $ua = new myua;
+			
+			$ua->set_creds(split m/:/, $server->{auth}) if exists($server->{auth});
+
+			print "\b" x 10, sprintf("%-10s", substr($server->{name},0,10));
+
+			my $data = $ua->get("http://$server->{domname}$server->{statuspage}")->content;
+
+		      parse_data: 
+			if (defined($data))
+			{
+			    $_ = $data;
+
+			    $data{by_server}->{$server->{name}} ||= {}; # holder for server-specific stats
+			    
+			    if (/^Total Accesses: \d+/s) # apache status, 'auto' mode
+			    {
+				/^Total Accesses: (\d+)/m and do 
+				{ 
+				    $data{requests} += $1; 
+				    $data{by_server}->{$server->{name}}->{requests} = $1;
+				};
+
+				/^Total kBytes: (\d+)/m   and do 
+				{ 
+				    $data{bytes}    += $1 * 1_024; 
+				    $data{by_server}->{$server->{name}}->{bytes} += $1 * 1_024;
+				};
+
+				/^Uptime: (\d+)/m         and $data{uptime}    = $1 if ((not exists $data{uptime})
+											or
+											($1 > $data{uptime})); # we want the highest uptime
+
+				/^BusyWorkers: (\d+)/m    and do 
+				{ 
+				    $data{working}  += $1;
+				    $data{by_server}->{$server->{name}}->{working} = $1;
+				};
+
+				/^IdleWorkers: (\d+)/m    and do
+				{
+				    $data{idle}     += $1;
+				    $data{by_server}->{$server->{name}}->{idle} = $1;
+				};
+				
+				/^Scoreboard: (\S+)/m     and do
+				{
+				    my $sb = $1;
+				    while ($sb =~ /(.)/sg) { $data{"scoreboard: $1"}++ }
+				};
+			    }
+			    elsif (/^<dt>Total accesses:/m) # apache normal mode
+			    {
+				/<dt>Server uptime:\s+((?:\d+ \S+\s+)+)/m and do
+				{
+				    my $w = $1;
+				    my $u = 0; # uptime
+				    $w =~ s/(\d+) days?//s     and $u += $1 * 86_400;
+				    $w =~ s/(\d+) hours?//s    and $u += $1 * 3600;
+				    $w =~ s/(\d+) minutes?//s  and $u += $1 * 60;
+				    $w =~ s/(\d+) seconds?//s  and $u += $1;
+				    
+				    $data{uptime} = $u if ((not exists $data{uptime})
+							   or
+							   ($u > $data{uptime}));
+				};
+				/^<dt>Total accesses: (\d+) - Total Traffic: ([\d.]+) ([TGMK])?B<\/dt>/m and do
+				{
+				    $data{requests} += $1;
+
+				    $data{by_server}->{$server->{name}}->{requests} = $1;
+
+				    my $data = $2;
+				    if ($3)
+				    {
+					for (qw(K M G T))
+					{
+					    $data *= 1_024;
+					    last if $_ eq $3;
+					};
+				    }
+				    $data{bytes} += $data;
+
+				    $data{by_server}->{$server->{name}}->{bytes} = $data;
+				};
+				/^<dt>(\d+) requests currently being processed, (\d+) idle workers/m and do
+				{
+				    $data{working} += $1;
+				    $data{idle}    += $2;
+
+				    $data{by_server}->{$server->{name}}->{working} = $1;
+				    $data{by_server}->{$server->{name}}->{idle}    = $1;
+				};
+				/workers<\/dt>[\r\n]+
+				    <\/dl><pre>(.+)<\/pre>/sx and do
+				{
+				    my $sb = $1;
+				    while ($sb =~ /([^\r\n])/sg) { $data{"scoreboard: $1"}++ }
+				};
+				# <tr><td><b>3-0</b></td>!!!<td>2548</td><td>1/276/35195</td><td><b>K</b>
+				# </td><td>0.29</td><td>0</td><td>13</td><td>0.0</td><td>1.70</td><td>221.07
+				# </td><td>81.104.130.166</td><td nowrap>www.s1jobs.com</td><td nowrap>GET /ui/images/forms/fieldbg.gif HTTP/1.1</td>!!!</tr>
+				# 
+				# process list of current requests
+				while (m!<tr><td><b>\d+-\d+</b></td>(<td>.+?\s+HTTP/\d+\.\d+</td>)</tr>!sg)
+				{
+				    my $w = $1;
+
+				    if ($w =~ m!<td>(?:\d+|-)</td><td>[\d/]+</td><td>(?:<b>([A-Z])</b>|([_.])).+
+                                                   <td>([\d.:]+)</td>
+                                                   <td\s+nowrap>(\S+)</td><td\s+nowrap>[A-Z]+\s+(\S+?)</td>!sx)
+				    {
+					my ($state, $ip, $domain, $page) = ($1||$2,$3,$4,$5);
+
+					$state = 'I' if $state eq '_';
+
+					$ip = "-" if $ip =~ /:/;
+
+					$ip_addresses{$ip} ||= { ip => gethostbyaddr(inet_aton($ip), AF_INET) || $ip, 
+								 count => 0, last_used => time() };
+
+					$ip_addresses{$ip}->{count}++; $ip_addresses{$ip}->{last_used} = time();
+					
+					push @detailed_usage, { host => $server->{name}, domain => $domain, state => $state, page => $page, ip => $ip_addresses{$ip}->{ip} };
+				    }
+				}
+			    }
+			}
+		    }
+		}
+		if (%last_data)
+		{
+		    $data{rps_now} = ($data{requests} - $last_data{requests}) 
+			/ (($data{poll_time} - $last_data{poll_time}) || 1);
+
+		    $data{bps_now} = ($data{bytes} - $last_data{bytes}) 
+			/ (($data{poll_time} - $last_data{poll_time}) || 1);
+		}
+		
+	      cache_data_for_next_time:
+		{
+		    %last_data = %data;
+		}
+	      housekeeping_of_ip_addresses:
+		{
+		    while (my ($ip, $hash) = each %ip_addresses)
+		    {
+			delete($ip_addresses{$ip}) if $hash->{last_used} < time() - (3_600 * 24); # 24 hour cache on ip addresses
+		    }
+		    # also don't allow more than 10_000 ip addresses
+		    my @remaining = reverse sort {$ip_addresses{$a}->{last_used} <=> $ip_addresses{$b}->{last_used}} keys %ip_addresses;
+
+		    if (@remaining > 10_000)
+		    {
+			%ip_addresses = map {$_ => $ip_addresses{$_}} @remaining[0..10_000];
+		    }
+		}
+
+		my ($width, $height, $wpx, $hpx, $lines_left) = map {undef} 1..5;
+		
+		($width, $height, $wpx, $hpx) = GetTerminalSize();
+		$lines_left = $height - 2;
+		
+	      header_lines:
+		{
+		    print $CLEAR, $RESET;
+		    
+		    my $line1 = do
+		    {
+			my $host_width = 52;
+			my $up_width   = $width - $host_width;
+			
+			my $uptime       = do
+			{
+			    my $days = $data{uptime} ? (($data{uptime}||0) > 86_400 ? sprintf("%d+", int($data{uptime} /= 86_400)) : "") : 0;
+			    
+			    sprintf("%s%d:%02d:%02d",
+				    $days,
+				    ($data{uptime}||0) / 60 / 60,
+				    ($data{uptime}||0) % 60 / 60,
+				    ($data{uptime}||0) % 60 % 60);
+			};
+			my $current_time = sprintf("%02d:%02d:%02d", Now());
+
+			my $number_of_apaches = get_num_apaches($conf);
+			my $number_of_servers = get_num_servers($conf);
+			
+			sprintf("%-${host_width}s%${up_width}s\n",
+				sprintf("Monitoring %d Apache instance%s",
+#				sprintf("Monitoring %d Apache instance%s on %d host%s",
+					$number_of_apaches,
+					$number_of_apaches == 1 ? '' : 's',
+					#$number_of_servers,
+					#$number_of_servers == 1 ? '' : 's',
+				),
+				"up $uptime [$current_time]");
+		    };
+		    print $line1;
+		    $lines_left--;
+
+		    my $line2 = do
+		    {
+			my @mods = qw(K M G T);
+
+			my $req   = $data{requests};
+			my $reqm  = ""; # requests modifier
+			
+			for (0..$#mods)
+			{
+			    ($req||0) > 1_000 and do
+			    {
+				$reqm = $mods[$_];
+				$req /= 1_000 if $req;
+			    };
+			}
+			
+			my $data   = $data{bytes};
+			my $datam  = ""; # data modifier
+			
+			for (0..$#mods)
+			{
+			    ($data||0) > 1_024 and do
+			    {
+				$datam = $mods[$_];
+				$data /= 1_024 if $data;
+			    };
+			}
+			
+			my $dps    = ($data{bytes}||0) / ($data{uptime}||1);
+			my $dpsm   = ""; # data per second modifier
+			
+			for (0..$#mods)
+			{
+			    $dps > 1_024 and do
+			    {
+				$dpsm = $mods[$_];
+				$dps /= 1_024;
+			    };
+			}
+			
+			sprintf(" Requests: %-13s  Data: %-18s  Per second:  %6s/%s%s\n",
+				sprintf("%.2f%s", abs($req || 0), $reqm || 0),
+				sprintf("%.2f%s", abs($data || 0), $datam || 0),
+				commas(abs sprintf("%.1f", ($data{requests}||0) / ($data{uptime}||1))),
+				commas(abs sprintf("%.1f", ($dps||0))), ($dpsm||0));
+		    };
+		    print $line2;
+		    $lines_left--;
+
+		    my $line3 = do
+		    {
+			my $server_split_requests = join "/",
+			map {sprintf("%d%%", ($data{by_server}->{$_}->{requests}||0) / ($data{requests}||1) * 100)} 
+			sort keys %{$data{by_server}};
+
+			my $server_split_data = join "/",
+			map {sprintf("%d%%", ($data{by_server}->{$_}->{bytes}||0) / ($data{bytes}||1) * 100)} 
+			sort keys %{$data{by_server}};
+
+			my $per_second_stats = do
+			{
+			    if ($data{rps_now})
+			    {
+				my $dps    = $data{bps_now};
+				my $dpsm   = ""; # data per second modifier
+				
+				my @mods = qw(K M G T);
+				
+				for (0..$#mods)
+				{
+				    $dps > 1_024 and do
+				    {
+					$dpsm = $mods[$_];
+					$dps /= 1_024;
+				    };
+				}
+				
+				sprintf(" Per sec now: %6s/%s%s",
+					commas(abs sprintf("%.1f", $data{rps_now})),
+					commas(abs sprintf("%.1f", $dps)), $dpsm);
+			    }
+			    else { "" }
+			};
+			sprintf(" %-24s %-24s %s\n",
+				$server_split_requests,
+				$server_split_data,
+				$per_second_stats);
+		    };
+		    print $line3;
+		    $lines_left--;
+
+		    my $line4 = do
+		    {
+			my @stats = ();
+
+			my @activity = qw(I S R W L K C); # activity, in preferred order, of TOTAL requests
+##			for (@activity) { $data{"scoreboard: $_"} ||= 0 } # set any unset ones to zero ## no
+			$data{"scoreboard: I"} = 0; # pre-set this one only so it's included
+
+		      activity_stat: # percentages of what's happening on the server just now
+			for (sort {my $a_idx = 9;
+				   for (0..$#activity)
+				   {
+				       $a->[0] eq $activity[$_] and $a_idx = $_, last;
+				   }
+				   my $b_idx = 9;
+				   for (0..$#activity)
+				   {
+				       $b->[0] eq $activity[$_] and $b_idx = $_, last;
+				   }
+				   $a_idx <=> $b_idx or $a cmp $b}
+			     grep {$_->[0] ne '_' and $_->[0] ne '.'} 
+			     map  {/^scoreboard:\s+(\S)/; [$1,$_]} 
+			     grep {/^scoreboard:/} keys %data)
+			{
+			    my $label = $_->[0];
+			    my $value = ($label eq 'I' 
+					 ? $data{idle}
+					 : sprintf("%d",$data{$_->[1]}/(($data{working}+$data{idle})||1) * 100));
+
+			    next activity_stat if ! $value;
+
+			    my $both  = "$label: $value%";
+
+			    if ($label eq 'I') # colour to indicate whether we're ok for idle processes
+			    {
+				if ($data{working} <= ($data{idle} + $data{working}) * 
+				    ($conf->{working_threads_threshold_pct} / 100))
+				{
+				    $both = sprintf("%s%s%s: %d%%%s",
+						    $GREEN, $BOLD, $label,
+						    $data{idle} / ($data{idle} + $data{working}) * 100,
+						    $RESET);
+				}
+				else
+				{
+				    $both = "$RED$BOLD$label: $value%$RESET";
+				}
+			    }
+			    elsif ($value) # working processes which are active. bold.
+			    {
+				$both = "$BOLD$label: $value%$RESET";
+			    }
+
+			    push @stats, $both;
+			}
+			
+			my $working = $data{working} || 0; # make this red if it's >= total threshold percent (e.g. 90% of total, make it red)
+			if ($working and $working >= ($data{idle} + $data{working}) * ($conf->{working_threads_threshold_pct} / 100))
+			{
+			    $working = sprintf("%s%s%s", $RED, commas($working), $RESET);
+			}
+			else { $working = commas($working) }
+
+			sprintf(" Threads: %4s/%-4s       Activity: %s\n",
+				$working || 0, commas(($data{idle} || 0) + ($data{working} || 0)),
+				join(' ', @stats));
+		    };
+		    print $line4;
+		    $lines_left--;
+
+		    my $line5 = "\n";
+		    print $line5;
+		    $lines_left--;
+		    
+		    my $line6 = do # column headers
+		    {
+			my $all_but_page_width = (2 + 6 + 10 + 16 + 1 + 24 + + 2);
+			my $page_width         = 24 < $width - $all_but_page_width 
+			    ? 24 
+			    : $width - $all_but_page_width;
+
+			join "",
+			sprintf(qq[%s %-6s S  %-16s %-24s  %-${page_width}s\n],
+				$BOLD, 'Host', 'Domain', 'Site', 'Page'),
+			qq[ ----   -  ------           ----                      ----$RESET\n],
+		    };
+		    print $line6;
+		    $lines_left--;
+
+		    print "\n"; $lines_left--;
+		}
+	      data_lines:
+		{
+		    my @activity = qw(S R W L K C I); # activity, in preferred order
+		    for (sort {my $a_idx = 9;
+			       for (0..$#activity)
+			       {
+				   $a->{state} eq $activity[$_] and $a_idx = $_, last;
+			       }
+			       my $b_idx = 9;
+			       for (0..$#activity)
+			       {
+				   $b->{state} eq $activity[$_] and $b_idx = $_, last;
+			       }
+			       $a_idx <=> $b_idx or $a cmp $b}
+			 @detailed_usage)
+		    {
+			my %state_colours = (W => $RED, R => $YELLOW, K => $GREEN, C => $BLUE);
+
+			my $all_but_page_width = (2 + 6 + 10 + 16 + 1 + 24 + + 2);
+			my $page_width         = 24 < $width - $all_but_page_width
+			    ? 24
+			    : $width - $all_but_page_width;
+
+			print sprintf("%s %-6s %s  %-16s %-22s   %-${page_width}s%s\n",
+				      $state_colours{$_->{state}} || '',
+				      $_->{host},
+				      $_->{state},
+				      substr($_->{ip},-16,16),
+				      substr($_->{domain},-22,22),
+				      substr($_->{page},0,$page_width),
+				      $RESET);
+
+			$lines_left--;
+
+			last if $lines_left < 2;
+		    }
+		    #
+		    do { print "\n" x 2; $lines_left -= 2 } if $lines_left > 2;
+
+		    print "\n" x ($lines_left - 1);
+		}
+	    }
+	    $key = ReadKey($conf->{delay});
+	    next main_loop if ! $key;
+	}
+
+	#--
+
+      process_keystrokes: # if we get this far 
+	{
+	    $key =~ /q/i and last main_loop; # quit
+
+	    $key =~ /s/i and do # set sleep seconds
+	    {
+		ReadMode($RM_RESET);
+		
+		print $RED, "Seconds of Delay: ", $RESET;
+		my $secs = ReadLine(0);
+		
+		if ($secs =~ /^\s*(\d+)/)
+		{
+		    $conf->{delay} = $1;
+		    if ($conf->{delay} < 1)
+		    {
+			$conf->{delay} = 1;
+		    }
+		}
+		ReadMode($RM_NOBLKRD);
+		next main_loop;
+	    };
+	}
+    }
+    
+    ReadMode($RM_RESET);
+    print "\n";
+}
+
+#--
+
+sub get_num_apaches
+{
+    my $conf = shift or return 0;
+    
+    if (not (exists($conf->{servers}) and ref($conf->{servers}) eq 'ARRAY'))
+    {
+	return 0;
+    }
+
+    return scalar @{$conf->{servers}};
+}
+
+sub get_num_servers
+{
+    my $conf = shift or return 0;
+    
+    if (not (exists($conf->{servers}) and ref($conf->{servers}) eq 'ARRAY'))
+    {
+	return 0;
+    }
+
+    my %hosts = map {lc()=>1} map {$_->{hostname}} @{$conf->{servers}};
+
+    return scalar @{[keys %hosts]};
+}
+
+sub commas
+{
+    my $r =  reverse shift;
+    $r    =~ s/(\d\d\d)(?=\d)(?!\d*\.)/$1,/g;
+    return scalar reverse $r;
+}
+
+sub Now # name from date::calc
+{
+    my @now = localtime;
+    
+    return( reverse @now[0..2] ); # hours, minutes, seconds
+}

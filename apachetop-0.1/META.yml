@@ -1,0 +1,27 @@
+--- #YAML:1.0
+meta-spec:
+   version: 1.3
+   url: http://module-build.sourceforge.net/META-spec-v1.3.html
+
+name:         apachetop
+abstract:     A 'top'-like utility for monitoring one or more Apache servers
+license:      apache2
+version:      0.1
+version_from: apachetop
+installdirs:  site
+author:
+    - Jeremy Jones <jer@jeremyjones.com>
+
+requires:
+    LWP::UserAgent                 0.1
+    Term::ReadKey:                 2.1
+    Term::ANSIColor                1.09
+    Socket                         1.75
+    Time::HiRes                    1.5
+    
+resources:
+    license:   http://www.apache.org/licenses/LICENSE-2.0.txt
+    homepage:  http://www.jeremyjones.com/apachetop/
+
+distribution_type: script
+generated_by: Jeremy Jones <jer@jeremyjones.com>
