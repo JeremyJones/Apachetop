@@ -1,7 +1,0 @@
-delay=20
-web01=http://statmast:ch-ch-changes@www.s1now.com/web01-apache-status
-web02=http://statmast:ch-ch-changes@www.s1now.com/web02-apache-status
-web03=http://statmast:ch-ch-changes@www.s1now.com/web03-apache-status
-web04=http://statmast:ch-ch-changes@www.s1now.com/web04-apache-status
-web05=http://statmast:ch-ch-changes@www.s1now.com/web05-apache-status
-web06=http://statmast:ch-ch-changes@www.s1now.com/web06-apache-status
