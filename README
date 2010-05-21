@@ -1,0 +1,10 @@
+apachetop is a console-based (non-gui) tool for monitoring the threads
+and overall performance of a set of Apache web servers. It runs on
+Unix systems which have Perl, LWP, and Term::ReadKey installed. It is
+based largely on the excellent mytop tool written by Jeremy Zawodny.
+
+For more information see apachetop.html or its wiki page at github:
+
+  http://github.com/JeremyJones/Apachetop
+
+
