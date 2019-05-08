@@ -10,7 +10,7 @@ version:      0.1
 version_from: apachetop
 installdirs:  site
 author:
-    - Jeremy Jones <jer@jeremyjones.com>
+    - Jeremy Jones <jer@jerjones.com>
 
 requires:
     LWP::UserAgent                 0.1
@@ -21,7 +21,7 @@ requires:
     
 resources:
     license:   http://www.apache.org/licenses/LICENSE-2.0.txt
-    homepage:  http://www.jeremyjones.com/apachetop/
+    homepage:  https://github.com/JeremyJones/Apachetop
 
 distribution_type: script
-generated_by: Jeremy Jones <jer@jeremyjones.com>
+generated_by: Jeremy Jones <jer@jerjones.me>
